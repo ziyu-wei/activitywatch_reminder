@@ -1,0 +1,195 @@
+---
+
+# Requests 使用文档
+
+本项目使用 [requests](https://docs.python-requests.org/) 库与 [ActivityWatch](https://activitywatch.readthedocs.io/) 提供的 API 通信，获取应用/网站的使用时长等监测数据，并根据这些数据进行提醒或阻断操作。
+
+## 1. 安装与基础配置
+
+1. **安装 requests 库**  
+   在项目的 `requirements.txt` 中已经列出了 `requests`，只需通过命令安装依赖：
+   ```bash
+   pip install -r requirements.txt
+   ```
+   或者手动安装：
+   ```bash
+   pip install requests
+   ```
+
+2. **ActivityWatch API 端口与地址**  
+   - ActivityWatch 默认在本地的 `5600` 端口启动 Web UI 和 API（例如 `http://localhost:5600`）。  
+   - 你需要确保 ActivityWatch 的后台已启动，并且可以通过浏览器访问 `http://localhost:5600`。
+
+3. **项目中使用位置**  
+   - 我们在 `aw_api.py`（或你自定义的模块中）集中封装与 ActivityWatch 交互的逻辑。  
+   - 其他模块只需要调用 `aw_api.py` 提供的函数，即可获取所需的使用时长、应用名称等信息。
+
+---
+
+## 2. 常见请求示例
+
+以下示例展示了如何在 Python 中使用 `requests` 来调用 ActivityWatch API，以获取或处理监控数据。具体接口可参见 [ActivityWatch 文档](https://activitywatch.readthedocs.io/en/latest/api/)。
+
+### 2.1 获取某个 Bucket 的事件数据
+
+ActivityWatch 会将不同来源的数据存储在不同的 *Buckets* 中，如 `aw-watcher-window`（记录当前窗口使用情况）、`aw-watcher-web`（记录网页使用情况）等。
+
+```python
+import requests
+import datetime
+
+def get_bucket_events(bucket_id, start_time, end_time):
+    """
+    获取指定 bucket 在给定时间区间内的所有事件数据
+    
+    :param bucket_id: Bucket 的 ID（如 'aw-watcher-window_myuser_windows'）
+    :param start_time: 起始时间 (datetime 对象)
+    :param end_time: 结束时间 (datetime 对象)
+    :return: 返回事件列表（list）
+    """
+    base_url = "http://localhost:5600/api/0"  # ActivityWatch API 根地址
+    endpoint = f"/buckets/{bucket_id}/events"
+
+    # 将 datetime 转换为 iso8601 字符串，如 "2023-10-10T00:00:00Z"
+    start_str = start_time.isoformat()
+    end_str = end_time.isoformat()
+
+    params = {
+        "start": start_str,
+        "end": end_str
+    }
+
+    try:
+        response = requests.get(base_url + endpoint, params=params)
+        response.raise_for_status()  # 如果响应状态码不是 200-299，抛出异常
+        events = response.json()
+        return events
+    except requests.exceptions.RequestException as e:
+        print("请求 ActivityWatch API 出错：", e)
+        return []
+```
+
+- **URL 拼接**：`/api/0` 是 ActivityWatch 最新版本的 API 前缀，后面再拼接 `/buckets/{bucket_id}/events`。  
+- **URL 参数**：通过 `params` 传递 `start`、`end` 时间。  
+- **异常处理**：使用 `requests.exceptions.RequestException` 来捕获网络或 HTTP 错误。
+
+### 2.2 获取所有 Buckets 列表
+
+```python
+def get_all_buckets():
+    """
+    获取 ActivityWatch 中当前所有的 buckets 列表（包括 watch-window、watch-web 等）
+    """
+    base_url = "http://localhost:5600/api/0"
+    endpoint = "/buckets"
+
+    try:
+        response = requests.get(base_url + endpoint)
+        response.raise_for_status()
+        buckets = response.json()
+        return buckets
+    except requests.exceptions.RequestException as e:
+        print("请求 ActivityWatch API 出错：", e)
+        return []
+```
+
+- 获取全部 Buckets 后，你就可以根据名称或使用场景来过滤需要处理的监控数据。
+
+---
+
+## 3. 常见用法与技巧
+
+1. **设置超时 (`timeout`)**  
+   - 避免在网络异常或 ActivityWatch 未启动时程序一直卡住。
+   ```python
+   requests.get(url, timeout=5)
+   ```
+2. **异常处理**  
+   - `response.raise_for_status()` 会在状态码非 2xx 时抛出错误，便于统一处理。  
+   - `requests.exceptions` 下有多种异常类型，如 `ConnectionError`、`Timeout` 等。
+3. **JSON 解析**  
+   - `response.json()` 会自动将返回的 JSON 数据转换为 Python 对象（通常为 dict 或 list）。  
+   - 如果返回的不是有效 JSON，会抛出 `JSONDecodeError` 异常，需要注意。
+4. **调试输出**  
+   - 建议在调试时打印 `response.status_code`、`response.text` 或者完整请求 URL（含参数）来排查问题。
+
+---
+
+## 4. 典型流程示例
+
+下面给出一个“**获取当日数据并汇总**”的示例流程，示范如何组合请求来统计应用使用时长：
+
+```python
+import datetime
+
+def get_today_usage():
+    # 1. 获取所有 buckets
+    buckets = get_all_buckets()
+    
+    # 2. 找到与当前系统匹配的某些 buckets（如窗口监控）
+    # 例如：'aw-watcher-window_myuser_windows'
+    target_buckets = [
+        b for b in buckets
+        if b['id'].startswith('aw-watcher-window')
+    ]
+    
+    # 3. 获取今天 0 点和当前时间，构造时间区间
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+    now = datetime.datetime.now()
+    
+    total_minutes = 0
+    
+    # 4. 循环每个目标 bucket，获取事件并累计使用时长
+    for bucket_info in target_buckets:
+        bucket_id = bucket_info['id']
+        events = get_bucket_events(bucket_id, today_start, now)
+        
+        # 简易统计：假设每条 event 的 duration 存在 'duration' 字段
+        for event in events:
+            # 某些 events 没有 duration，需要根据开始/结束时间来计算
+            duration_sec = event.get('duration', 0)
+            total_minutes += duration_sec / 60
+    
+    return total_minutes
+```
+
+> 在实际项目中，你要根据 `ActivityWatch` 事件的结构来计算时长，一些事件没有直接的 `duration` 字段，需要用 `start` 和 `end` 时间来计算。
+
+---
+
+## 5. 请求错误或无数据时的处理
+
+1. **无数据返回**  
+   - 当时间区间内没有任何事件，`events` 可能是空列表，统计时要避免除零或空引用错误。
+2. **ActivityWatch 未启动**  
+   - 如果 API 请求失败，可能是连接被拒绝 (`ConnectionError`)。在 UI 或日志里提示用户“请先启动 ActivityWatch”。
+3. **API 结构变动**  
+   - 如果 ActivityWatch 升级，API 结构或端点可能会改变。请留意官方文档的变更记录。
+
+---
+
+## 6. 后续扩展
+
+- **写入事件**：根据官方文档，你也可以往 ActivityWatch 写入自定义事件（如记录你自己额外的统计），不过需先了解[如何注册 Watcher](https://activitywatch.readthedocs.io/en/latest/getting-started/creating-a-watcher.html)或使用令牌验证。
+- **跨平台适配**：如果你要在 macOS 或 Linux 上使用，需要先确认 ActivityWatch 是否运行在相同端口（一般是 5600），然后只要修改 `base_url` 即可。
+- **多用户或多机器**：如果在多台机器上部署，需要在启动时区分不同的 ActivityWatch 实例 URL，或使用本地网络访问远程 ActivityWatch 服务。
+
+---
+
+## 7. 参考链接
+
+- [ActivityWatch 官方文档](https://activitywatch.readthedocs.io/en/latest/)  
+- [Requests 官方文档](https://docs.python-requests.org/en/latest/)  
+- [Python 异常处理官方文档](https://docs.python.org/3/tutorial/errors.html)
+
+---
+
+## 总结
+
+通过 Python 的 `requests` 库与 ActivityWatch API 交互是本项目数据来源的核心步骤。掌握如下要点有助于开发和维护：
+
+1. **清晰的 API 封装**：将所有与 ActivityWatch 的通信放在单一模块中（如 `aw_api.py`），方便后续修改和调试。  
+2. **完善的异常捕捉**：网络不稳定或 ActivityWatch 未启动时，程序要能优雅地给出提示，而非直接崩溃。  
+3. **结构化的数据处理**：根据获取到的事件内容进行有效解析和统计，最终提供给提醒或阻断逻辑使用。
+
+如有更多疑问或改进需求，欢迎在项目 Issue 中提出或直接提交 Pull Request。祝你开发顺利、使用愉快！
